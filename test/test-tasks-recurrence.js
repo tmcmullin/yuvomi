@@ -121,7 +121,7 @@ function insertTask(fields) {
 
 test('PATCH done: überfällige Wochen-Serie erzeugt genau eine Folgeinstanz in der Zukunft', async () => {
   const id = insertTask({
-    title: 'Bad putzen', category: 'Haushalt', priority: 'medium', status: 'open',
+    title: 'Bad putzen', category: 'household', priority: 'medium', status: 'open',
     due_date: dayKey(-21), created_by: uid, is_recurring: 1, recurrence_rule: 'FREQ=WEEKLY',
   });
   db.prepare('INSERT INTO task_assignments (task_id, user_id) VALUES (?, ?)').run(id, uid);
@@ -161,4 +161,42 @@ test('PATCH done: Subtask einer Serie erzeugt keine Folgeinstanz', async () => {
   await call('PATCH', `/${sub}/status`, { status: 'done' });
   const rows = db.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE title = 'Sub'`).get();
   assert.equal(rows.n, 1, 'Subtasks dürfen keine Folgeinstanz auslösen');
+});
+
+// --------------------------------------------------------
+// Integration: PUT /:id (Bearbeiten-Modal setzt status='done')
+// --------------------------------------------------------
+test('PUT :id done: tägliche Serie erzeugt Folgeinstanz genau wie PATCH /status', async () => {
+  const id = insertTask({
+    title: 'Blumen gießen', category: 'household', priority: 'low', status: 'open',
+    due_date: dayKey(0), created_by: uid, is_recurring: 1, recurrence_rule: 'FREQ=DAILY',
+  });
+  db.prepare('INSERT INTO task_assignments (task_id, user_id) VALUES (?, ?)').run(id, uid);
+
+  const res = await call('PUT', `/${id}`, {
+    title: 'Blumen gießen', category: 'household', priority: 'low', status: 'done',
+    due_date: dayKey(0), is_recurring: true, recurrence_rule: 'FREQ=DAILY',
+  });
+  assert.equal(res.status, 200);
+
+  const followups = db.prepare(
+    `SELECT * FROM tasks WHERE title = 'Blumen gießen' AND status = 'open' AND parent_task_id IS NULL`,
+  ).all();
+  assert.equal(followups.length, 1, 'PUT auf status=done muss ebenfalls genau eine Folgeinstanz erzeugen');
+  assert.ok(followups[0].due_date >= todayKey(), 'Folgeinstanz muss in der Zukunft fällig sein');
+  const assignees = db.prepare('SELECT user_id FROM task_assignments WHERE task_id = ?').all(followups[0].id);
+  assert.deepEqual(assignees.map((a) => a.user_id), [uid]);
+});
+
+test('PUT :id done: erneutes Speichern einer bereits erledigten Serie erzeugt keine weitere Folgeinstanz', async () => {
+  const id = insertTask({
+    title: 'Müll rausbringen', category: 'household', priority: 'low', status: 'done',
+    due_date: dayKey(0), created_by: uid, is_recurring: 1, recurrence_rule: 'FREQ=DAILY',
+  });
+  await call('PUT', `/${id}`, {
+    title: 'Müll rausbringen (bearbeitet)', category: 'household', priority: 'low', status: 'done',
+    due_date: dayKey(0), is_recurring: true, recurrence_rule: 'FREQ=DAILY',
+  });
+  const rows = db.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE title LIKE 'Müll rausbringen%'`).get();
+  assert.equal(rows.n, 1, 'Kein erneuter Übergang nach done → keine neue Folgeinstanz');
 });

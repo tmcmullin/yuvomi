@@ -128,6 +128,34 @@ function setAssignments(d, taskId, userIds) {
   for (const uid of userIds) ins.run(taskId, uid);
 }
 
+/**
+ * Wiederkehrende Aufgabe abgeschlossen: nächste Instanz erstellen.
+ * Von PATCH /:id/status UND PUT /:id aufgerufen, damit beide Wege zum
+ * Abhaken (Kanban/Swipe vs. Bearbeiten-Modal) die Serie gleich fortsetzen.
+ */
+function spawnNextRecurringInstance(d, task) {
+  if (!task?.is_recurring || !task.recurrence_rule || task.parent_task_id) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const nextDate = nextOccurrenceAfter(task.due_date, task.recurrence_rule, today);
+  if (!nextDate) return;
+
+  const existingAssignments = d
+    .prepare('SELECT user_id FROM task_assignments WHERE task_id = ?')
+    .all(task.id).map((r) => r.user_id);
+  d.transaction(() => {
+    const newTask = d.prepare(`
+      INSERT INTO tasks (title, description, category, priority, status,
+        due_date, due_time, assigned_to, created_by, is_recurring, recurrence_rule, points, visibility)
+      VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, 1, ?, ?, ?)
+    `).run(
+      task.title, task.description, task.category, task.priority,
+      nextDate, task.due_time, task.assigned_to, task.created_by,
+      task.recurrence_rule, task.points, task.visibility
+    );
+    setAssignments(d, newTask.lastInsertRowid, existingAssignments);
+  })();
+}
+
 function syncHousekeepingPaymentStatus(d, taskId, status) {
   const table = d.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'housekeeping_work_sessions'").get();
   if (!table) return;
@@ -491,6 +519,15 @@ router.put('/:id', (req, res) => {
       FROM tasks t LEFT JOIN users u ON t.assigned_to = u.id
       WHERE t.id = ?
     `).get(req.params.id);
+
+    // Wiederkehrende Aufgabe: nächste Instanz erstellen, wenn dieses Speichern sie
+    // (im Bearbeiten-Modal) neu auf 'done' gesetzt hat. Nur bei echtem Übergang
+    // auslösen, sonst würde jedes erneute Speichern einer bereits erledigten Serie
+    // eine weitere Folgeinstanz erzeugen.
+    if (status === 'done' && task.status !== 'done') {
+      spawnNextRecurringInstance(db.get(), updated);
+    }
+
     addAssignedUsers(updated);
     updated.subtasks = loadSubtasks(updated.id);
 
@@ -526,30 +563,7 @@ router.patch('/:id/status', (req, res) => {
     // Wiederkehrende Aufgabe: nächste Instanz erstellen wenn erledigt
     if (status === 'done') {
       const task = db.get().prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-      if (task?.is_recurring && task.recurrence_rule && !task.parent_task_id) {
-        // Überfällige Serien aufholen: nächste Instanz liegt immer in der Zukunft,
-        // statt blind altes Fälligkeitsdatum + Intervall (das selbst überfällig sein kann).
-        // Schwelle "heute" in UTC, konsistent zur Listen-Filterung mit SQL date('now').
-        const today = new Date().toISOString().slice(0, 10);
-        const nextDate = nextOccurrenceAfter(task.due_date, task.recurrence_rule, today);
-        if (nextDate) {
-          const existingAssignments = db.get()
-            .prepare('SELECT user_id FROM task_assignments WHERE task_id = ?')
-            .all(task.id).map((r) => r.user_id);
-          db.get().transaction(() => {
-            const newTask = db.get().prepare(`
-              INSERT INTO tasks (title, description, category, priority, status,
-                due_date, due_time, assigned_to, created_by, is_recurring, recurrence_rule, points, visibility)
-              VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, 1, ?, ?, ?)
-            `).run(
-              task.title, task.description, task.category, task.priority,
-              nextDate, task.due_time, task.assigned_to, task.created_by,
-              task.recurrence_rule, task.points, task.visibility
-            );
-            setAssignments(db.get(), newTask.lastInsertRowid, existingAssignments);
-          })();
-        }
-      }
+      spawnNextRecurringInstance(db.get(), task);
     }
 
     res.json({ data: { id: Number(req.params.id), status } });

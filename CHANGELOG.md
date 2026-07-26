@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Recurring tasks now schedule their next occurrence no matter how they're marked done. Completing one via Kanban drag, swipe, or the quick-toggle already worked, but saving it as "Done" from the task edit modal silently ended the series instead of creating tomorrow's task.
+
 ## [1.46.1] - 2026-07-26
 
 ### Fixed

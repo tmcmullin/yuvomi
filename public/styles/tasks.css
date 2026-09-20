@@ -1460,6 +1460,22 @@
   margin-bottom: var(--space-2);
 }
 
+/* .subtask-progress/.subtask-list carry their own horizontal padding because
+ * on the list row they sit inside .task-card, which has none of its own. The
+ * kanban card already pads itself (--space-3 on all sides), so without this
+ * override the subtask section would sit double-indented relative to the
+ * title and meta row above it. */
+.kanban-card .subtask-progress {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.kanban-card .subtask-list {
+  padding-left: 0;
+  padding-right: 0;
+  margin-bottom: var(--space-2);
+}
+
 .kanban-card__footer {
   display: flex;
   align-items: center;

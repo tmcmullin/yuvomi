@@ -377,13 +377,17 @@ async function wireSyncTarget(panel, task) {
  * Anhänge werden zur reinen Glyphe: die Zahl daneben war die einzige Stelle der
  * Zeile, an der eine Anzahl OHNE ihren Gegenstand stand.
  */
-function renderTaskCard(task, opts = {}) {
-  const { expandedSubtasks = false, showCheckbox = false, isChecked = false, showCategory = true } = opts;
-  const isDone = task.status === 'done';
-  const archived = isArchived(task);
-  // Gesperrte Aufgabe (#830): abhaken bleibt, umschreiben nicht. Die Knoepfe,
-  // die in einem 403 endeten, stehen deshalb gar nicht erst da.
-  const canEdit = canEditTaskDefinition(task);
+/**
+ * Fortschrittsleiste + auf-/zuklappbare Unteraufgabenliste einer Aufgabe.
+ *
+ * Geteilt zwischen Listenzeile und Kanban-Karte (#1250): beide zeigen dieselbe
+ * Unteraufgabenliste mit denselben `data-action`-Knoepfen, die der delegierte
+ * Klick-Handler von `wireTaskList` (an `#task-list`, einer gemeinsamen
+ * Vorfahrin beider Ansichten) ohnehin schon versteht - eine zweite Kopie
+ * dieser ~40 Zeilen haette sich bei jeder Aenderung (Icon, Label, ARIA) zwei
+ * Stellen suchen muessen und waere frueher oder spaeter auseinandergelaufen.
+ */
+function renderSubtaskSection(task, expandedSubtasks = false) {
   const progress = task.subtask_total > 0
     ? Math.round((task.subtask_done / task.subtask_total) * 100)
     : null;
@@ -433,6 +437,35 @@ function renderTaskCard(task, opts = {}) {
           </div>` : ''}
         </div>`).join('')
     : '';
+
+  return `
+      ${progress !== null ? `
+        <button type="button" class="subtask-progress" data-action="toggle-subtasks" data-id="${task.id}"
+                aria-expanded="${expandedSubtasks ? 'true' : 'false'}" aria-controls="subtasks-${task.id}"
+                aria-label="${t('tasks.subtaskToggle')}">
+          <div class="subtask-progress__bar-wrap">
+            <div class="subtask-progress__bar-fill" style="--progress-scale:${progress / 100}"></div>
+          </div>
+          <span class="subtask-progress__text">${task.subtask_done}/${task.subtask_total}</span>
+        </button>` : ''}
+
+      ${task.subtasks?.length ? `
+        <div class="subtask-list ${expandedSubtasks ? 'subtask-list--visible' : ''}"
+             id="subtasks-${task.id}">
+          ${subtasksHtml}
+          <button class="subtask-item__add" data-action="add-subtask" data-parent="${task.id}">
+            ${t('tasks.subtaskAdd')}
+          </button>
+        </div>` : ''}`;
+}
+
+function renderTaskCard(task, opts = {}) {
+  const { expandedSubtasks = false, showCheckbox = false, isChecked = false, showCategory = true } = opts;
+  const isDone = task.status === 'done';
+  const archived = isArchived(task);
+  // Gesperrte Aufgabe (#830): abhaken bleibt, umschreiben nicht. Die Knoepfe,
+  // die in einem 403 endeten, stehen deshalb gar nicht erst da.
+  const canEdit = canEditTaskDefinition(task);
 
   return `
     <div class="task-card ${isDone ? 'task-card--done' : ''} ${archived ? 'task-card--archived' : ''}" data-task-id="${task.id}">
@@ -504,25 +537,7 @@ function renderTaskCard(task, opts = {}) {
           <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="icon-md" aria-hidden="true"></i>
         </button>` : ''}
       </div>
-
-      ${progress !== null ? `
-        <button type="button" class="subtask-progress" data-action="toggle-subtasks" data-id="${task.id}"
-                aria-expanded="${expandedSubtasks ? 'true' : 'false'}" aria-controls="subtasks-${task.id}"
-                aria-label="${t('tasks.subtaskToggle')}">
-          <div class="subtask-progress__bar-wrap">
-            <div class="subtask-progress__bar-fill" style="--progress-scale:${progress / 100}"></div>
-          </div>
-          <span class="subtask-progress__text">${task.subtask_done}/${task.subtask_total}</span>
-        </button>` : ''}
-
-      ${task.subtasks?.length ? `
-        <div class="subtask-list ${expandedSubtasks ? 'subtask-list--visible' : ''}"
-             id="subtasks-${task.id}">
-          ${subtasksHtml}
-          <button class="subtask-item__add" data-action="add-subtask" data-parent="${task.id}">
-            ${t('tasks.subtaskAdd')}
-          </button>
-        </div>` : ''}
+      ${renderSubtaskSection(task, expandedSubtasks)}
     </div>`;
 }
 
@@ -1926,7 +1941,8 @@ async function runColumnMove(task, column, container) {
   await loadTasks(container);
 }
 
-function renderKanbanCard(task) {
+function renderKanbanCard(task, opts = {}) {
+  const { expandedSubtasks = false } = opts;
   const archived = isArchived(task);
   const due  = formatDueDate(task.due_date, task.due_time, task.status === 'done' || archived);
   // Aus der Ablage führt nur ein Schritt: zurück. Wohin, sagt der Status, den
@@ -1959,6 +1975,7 @@ function renderKanbanCard(task) {
         ${due ? `<span class="due-date ${due.cls}"><i data-lucide="clock" class="icon-sm" aria-hidden="true"></i> ${due.label}</span>` : ''}
         ${renderTagBadges(task.tags, TAG_BADGES_VISIBLE, task.priority)}
       </div>
+      ${renderSubtaskSection(task, expandedSubtasks)}
       <div class="kanban-card__footer">
         ${renderAvatarStack(task.assigned_users ?? [], { size: 22 }) || '<span></span>'}
         <button class="kanban-card__status-btn" type="button"
@@ -2028,7 +2045,9 @@ function renderKanban(container) {
           </div>
           <div class="kanban-col__body" data-drop-zone="${col.status}">
             ${grouped[col.status].length
-              ? grouped[col.status].map((task) => renderKanbanCard(task)).join('')
+              ? grouped[col.status].map((task) => renderKanbanCard(task, {
+                  expandedSubtasks: state.subtasksExpandedByDefault,
+                })).join('')
               : `<div class="kanban-col__empty">
                    <span class="kanban-col__empty-idle">${t('tasks.kanbanColEmpty')}</span>
                    <span class="kanban-col__empty-drop">${t('tasks.kanbanDropHint')}</span>
@@ -2102,7 +2121,14 @@ function wireKanbanSortable(container) {
       //
       // Der Titel bleibt greifbar: an ihm nimmt man die Karte auf, das war
       // vorher so und ist die einzige grosse Flaeche, die dafuer taugt.
-      filter: '[data-next-status]',
+      //
+      // `[data-action]` GEHOERT SEIT DER UNTERAUFGABENLISTE (#1250) MIT IN DEN
+      // FILTER, aus demselben Grund wie beim Weiterschalt-Knopf oben: ein Tipp
+      // auf den Auf-/Zuklapp-Knopf oder ein Haken an einer Teilaufgabe, der
+      // dabei etwas wandert, haette sonst die ganze Karte aufgenommen statt die
+      // Teilaufgabe abzuhaken - und sie womoeglich in eine andere Spalte
+      // fallen lassen.
+      filter: '[data-next-status], [data-action]',
       group: 'kanban-board',
       sort: false,
       onEnd: (evt) => {
@@ -2141,6 +2167,14 @@ function wireKanbanClicks(container) {
       await runColumnMove(task, statusBtn.dataset.nextStatus, container);
       return;
     }
+
+    // Die Unteraufgabenliste (#1250) traegt eigene `data-action`-Knoepfe
+    // (auf-/zuklappen, abhaken, umbenennen, loeschen), die der delegierte
+    // Handler von `wireTaskList` an `#task-list` versteht - derselben
+    // Vorfahrin, unter der auch das Kanban-Board haengt. Ohne diesen Ausstieg
+    // faengt der generische Kartenklick unten JEDEN Klick in der Karte ab und
+    // oeffnet die Details, noch bevor das Ereignis dort ankommt.
+    if (e.target.closest('[data-action]')) return;
 
     const card = e.target.closest('.kanban-card[data-task-id]');
     if (!card) return;

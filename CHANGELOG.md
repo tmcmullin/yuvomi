@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A Kanban card can now show and check off its subtasks without opening the task.** The progress
+  pill under a card's title (already there for the list view) expands into the same checkbox list,
+  rename and delete controls the list view has always had - previously a Kanban card carried no
+  subtask affordance at all, so ticking one off meant opening the task first.
+
 - **A wall tablet can now tick a task off and ask for a reward, for whoever is standing in front of
   it.** Until now a display only showed things. Tapping a task on a tablet opens the list of people
   and asks who did it, because on a wall "me" is nobody; picking someone ticks the task off and

@@ -360,26 +360,38 @@ test('tasks: das Board zieht ueber den Wrapper, nicht mehr ueber natives DnD', (
   }
 });
 
-test('tasks: das Board bietet keine Reihenfolge an, die es nicht speichert', () => {
+test('tasks: das Board bietet innerhalb einer Spalte die Reihenfolge an, die es seit #1251 speichert', () => {
   const source = read('../public/pages/tasks.js');
   const call = callBlockOf(source, 'makeSortable(zone, {');
-  assert.match(call, /sort:\s*false/,
-    'innerhalb einer Spalte gibt es keinen Rang - eine umsortierte Karte bliebe sonst liegen, bis etwas anderes neu zeichnet');
+  // Bis #1251 war das hier `sort: false`: das Board speicherte keinen Rang
+  // innerhalb einer Spalte, durfte die Umsortierung also auch nicht anbieten -
+  // sie waere liegengeblieben, bis irgendetwas anderes neu zeichnet. Seit
+  // tasks.sort_order (Migration 217) und PATCH /api/v1/tasks/reorder gilt das
+  // Gegenteil: was jetzt gespeichert wird, darf jetzt auch angeboten werden.
+  assert.match(call, /sort:\s*true/,
+    'seit #1251 speichert tasks.sort_order eine Reihenfolge je Spalte, also darf das Board sie auch anbieten');
   assert.match(call, /group:/, 'zwischen den Spalten bleibt der Zug erlaubt');
   assert.match(call, /draggable:\s*'\.kanban-card'/,
     'sonst waere auch der Leerzustands-Hinweis im Spaltenkoerper ziehbar');
 });
 
-test('tasks: Drag-Ende und Weiterschalt-Knopf gehen denselben Weg', () => {
+test('tasks: Drag-Ende, Weiterschalt-Knopf und Tastaturpfad gehen denselben Weg', () => {
   const source = read('../public/pages/tasks.js');
-  // Die Zusage aus dem Kopf von sortable.js. Zwei getrennte Wege, die dasselbe
-  // zu tun behaupten, laufen auseinander, sobald einer einen Sonderfall bekommt -
-  // und der Sonderfall steht hier schon: die vierte Spalte ist die Ablage, kein
-  // Status (#688).
-  const drop = source.slice(source.indexOf('onEnd: (evt)'), source.indexOf('onEnd: (evt)') + 500);
-  assert.match(drop, /runColumnMove\(/, 'der Drop laeuft durch runColumnMove');
+  // Die Zusage aus dem Kopf von sortable.js. Getrennte Wege, die dasselbe zu tun
+  // behaupten, laufen auseinander, sobald einer einen Sonderfall bekommt - und
+  // seit #1251 gibt es hier zwei Sonderfaelle: die vierte Spalte ist die Ablage,
+  // kein Status (#688), und eine reine Umsortierung ist gar kein Statuswechsel.
+  const drop = source.slice(source.indexOf('onEnd: (evt)'), source.indexOf('onEnd: (evt)') + 700);
+  assert.match(drop, /runColumnMove\(/, 'der Spaltenwechsel laeuft durch runColumnMove');
+  assert.match(drop, /runColumnReorder\(/, 'die Umsortierung innerhalb einer Spalte (#1251) durch runColumnReorder');
   const clicks = source.slice(source.indexOf('function wireKanbanClicks'));
-  assert.match(clicks, /runColumnMove\(/, 'der Knopf ebenfalls');
+  assert.match(clicks, /runColumnMove\(/, 'der Weiterschalt-Knopf ebenfalls');
+  // Tastaturpfad (#1251): Pfeiltasten am Titel-Knopf muessen denselben
+  // Persistenz-Weg nehmen wie das Drag-Ende, sonst bliebe eine per Tastatur
+  // umsortierte Karte nur lokal verschoben und faellt beim naechsten Laden auf
+  // die alte Reihenfolge zurueck.
+  const keyboard = source.slice(source.indexOf('function moveKanbanCard'), source.indexOf('function moveKanbanCard') + 800);
+  assert.match(keyboard, /runColumnReorder\(/, 'der Tastaturpfad ruft denselben Persistenz-Handler wie das Drag-Ende');
 });
 
 test('tasks: der Weiterschalt-Knopf wird nicht zum Griff (Review zu #808)', () => {
@@ -389,8 +401,12 @@ test('tasks: der Weiterschalt-Knopf wird nicht zum Griff (Review zu #808)', () =
   // die Zeile verloren. Ohne Filter kennt SortableJS nur `a` und `img`, also
   // haette ein langer Druck auf den Knopf die Karte aufgenommen statt sie
   // weiterzuschalten - ausgerechnet an dem Element, das der Tastaturweg ist.
-  assert.match(call, /filter:\s*'\[data-next-status\]'/,
-    'der Statusknopf ist vom Ziehen ausgenommen');
+  //
+  // SEIT #1250/#1251 STEHT `[data-action]` DANEBEN: aus demselben Grund, fuer
+  // die Auf-/Zuklapp- und Abhak-Knoepfe der Unteraufgabenliste - aber der
+  // Statusknopf bleibt Teil des Filters, nur nicht mehr allein darin.
+  assert.match(call, /filter:\s*'\[data-next-status\][^']*'/,
+    'der Statusknopf ist weiterhin vom Ziehen ausgenommen');
 });
 
 test('sortable.js: Filtern heisst nicht ziehen, nicht: nicht bedienen', () => {

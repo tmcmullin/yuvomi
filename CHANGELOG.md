@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Kanban cards can now be dragged into a manual order within a column, keyboard included.**
+  Previously a column only ever sorted by due date; dragging a card just moved it between
+  columns. Cards you have not touched keep sorting by due date among themselves, so an untouched
+  column looks exactly as before - manual order only takes over once you actually drag something.
+  Arrow Up/Down on a focused card title reorders it the same way drag does, since drag alone
+  is not a path a keyboard or screen reader can take.
+
 - **A Kanban card can now show and check off its subtasks without opening the task.** The progress
   pill under a card's title (already there for the list view) expands into the same checkbox list,
   rename and delete controls the list view has always had - previously a Kanban card carried no

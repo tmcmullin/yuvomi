@@ -377,6 +377,11 @@ async function wireSyncTarget(panel, task) {
  * Anhänge werden zur reinen Glyphe: die Zahl daneben war die einzige Stelle der
  * Zeile, an der eine Anzahl OHNE ihren Gegenstand stand.
  */
+/** Soll diese Aufgabe ihre Unteraufgabenliste aufgeklappt zeichnen? Praeferenz-Standard ODER von Hand aufgeklappt (state.expandedSubtaskTaskIds, String-Vergleich wie am `data-id`). */
+function isSubtasksExpanded(taskId) {
+  return state.subtasksExpandedByDefault || state.expandedSubtaskTaskIds.has(String(taskId));
+}
+
 /**
  * Fortschrittsleiste + auf-/zuklappbare Unteraufgabenliste einer Aufgabe.
  *
@@ -622,7 +627,7 @@ function renderTaskGroups(tasks, groupMode) {
         ${sorted.map((t) => renderSwipeRow(t, renderTaskCard(t, {
           showCheckbox: state.bulkSelectMode,
           isChecked: state.selectedTaskIds.has(t.id),
-          expandedSubtasks: state.subtasksExpandedByDefault,
+          expandedSubtasks: isSubtasksExpanded(t.id),
           showCategory: groupMode !== 'category',
         }))).join('')}
       </div>`}
@@ -1151,6 +1156,14 @@ let state = {
   history:         { entries: [], hasMore: false, cursor: null, userId: null, loading: null, error: null },
   showFuture:      false,
   subtasksExpandedByDefault: false,
+  // Von Hand aufgeklappte Unteraufgabenlisten (#1250 Folgeanfrage): ohne das
+  // hier faellt eine Karte nach jedem Abhaken einer Teilaufgabe wieder auf
+  // `subtasksExpandedByDefault` zurueck, weil `loadTasks()` die ganze Liste
+  // neu zeichnet - der Klick, der gerade etwas abgehakt hat, klappte die
+  // Liste im selben Atemzug wieder zu. Getrennt vom Praeferenz-Standard, weil
+  // dieser Zustand sitzungslokal ist und nicht das Verhalten aller Karten
+  // aendern soll, nur der angefassten.
+  expandedSubtaskTaskIds: new Set(),
   // Persönliche Standard-Erinnerungsliste für neue Aufgaben (#695), leer = nur
   // lokal. Wird beim Öffnen des Dialogs als Vorauswahl gesetzt.
   defaultSyncTarget: '',
@@ -1892,6 +1905,27 @@ function kanbanColumnOf(task) {
   return isArchived(task) ? 'archived' : task.status;
 }
 
+/**
+ * Sortierung einer Kanban-Spalte: von Hand gezogene Karten (#1251) vor allem
+ * anderen, unberuehrte fallen weiter auf die Faelligkeits-Sortierung zurueck.
+ *
+ * `sort_order` faengt bei 0 an (Migration 217) und bleibt 0, bis jemand in
+ * dieser Spalte einmal zieht - dann bekommen ALLE Karten der Spalte einen
+ * fortlaufenden Rang (server/routes/tasks.js, PATCH /reorder verlangt die
+ * ganze Spalte). 0 bleibt deshalb zuverlaessig die Marke "nie angefasst",
+ * nie ein echter, erreichbarer Rang.
+ */
+function sortKanbanColumn(a, b, now) {
+  const aOrder = a.sort_order || 0;
+  const bOrder = b.sort_order || 0;
+  if (aOrder !== bOrder) {
+    if (aOrder === 0) return 1;
+    if (bOrder === 0) return -1;
+    return aOrder - bOrder;
+  }
+  return sortTasks(a, b, now);
+}
+
 function kanbanNextStatus(status) {
   if (status === 'open')        return 'in_progress';
   if (status === 'in_progress') return 'done';
@@ -1918,6 +1952,15 @@ async function moveTaskToColumn(before, column) {
   if (before.status !== column) await api.patch(`/tasks/${before.id}/status`, { status: column });
 }
 
+/**
+ * Reine Umsortierung innerhalb einer Kanban-Spalte (#1251, kein Statuswechsel).
+ * `order` ist die vollstaendige, neue Reihenfolge der Aufgaben-IDs dieser
+ * Spalte - dieselbe Vollstaendigkeitsregel wie bei /categories/reorder.
+ */
+async function reorderTasksInColumn(column, order) {
+  return api.patch('/tasks/reorder', { column, order });
+}
+
 /** Optimistisches Spiegelbild von moveTaskToColumn auf dem State-Objekt. */
 function applyColumnLocally(task, column) {
   if (column === 'archived') {
@@ -1939,6 +1982,60 @@ async function runColumnMove(task, column, container) {
     window.yuvomi.showToast(err.message, 'danger');
   }
   await loadTasks(container);
+}
+
+/**
+ * Persistiert eine Umsortierung innerhalb einer Spalte (#1251). SortableJS hat
+ * die Karte schon an die richtige DOM-Stelle gezogen, bevor `onEnd` feuert -
+ * die aktuelle DOM-Reihenfolge der Spalte IST also schon die gewuenschte.
+ *
+ * KEIN `renderKanban()` vorher: anders als beim Spaltenwechsel (der Kopfzeilen-
+ * Zaehler mitzieht) aendert eine reine Umsortierung an den Zaehlern nichts, ein
+ * sofortiges Neuzeichnen wuerfe der Karte nur den Drag-Schwung weg.
+ */
+async function runColumnReorder(column, container) {
+  const zone = container.querySelector(`.kanban-col__body[data-drop-zone="${column}"]`);
+  if (!zone) return;
+  const order = [...zone.querySelectorAll('.kanban-card[data-task-id]')]
+    .map((el) => Number(el.dataset.taskId));
+  try {
+    const { data } = await reorderTasksInColumn(column, order);
+    // Die Antwort traegt die neuen sort_order-Werte - ins lokale Modell
+    // uebernehmen, damit ein zwischenzeitliches loadTasks() nicht kurz auf die
+    // alte Faelligkeits-Sortierung zurueckfaellt, bevor sie eintrifft.
+    const byId = new Map(data.map((r) => [r.id, r.sort_order]));
+    for (const task of state.tasks) {
+      if (byId.has(task.id)) task.sort_order = byId.get(task.id);
+    }
+  } catch (err) {
+    window.yuvomi.showToast(err.message, 'danger');
+    await loadTasks(container);
+  }
+}
+
+/**
+ * Tastaturpfad fuer die Umsortierung (#1251): derselbe Persistenz-Handler wie
+ * das Drag-Ende, siehe der Kopf von public/utils/sortable.js. Drag allein
+ * schliesst Tastatur- und Screenreader-Bedienung aus - dieselbe Regel wie bei
+ * der Einkaufsliste (shopping.js, moveItemRow).
+ *
+ * Verschiebt um einen Platz und haelt den Fokus auf dem Titel-Knopf, der auch
+ * der Drag-Griff der Karte ist (kein eigenes Handle-Element auf der Karte).
+ */
+function moveKanbanCard(card, delta, container) {
+  const zone = card.closest('.kanban-col__body[data-drop-zone]');
+  if (!zone) return;
+  const cards  = [...zone.querySelectorAll('.kanban-card[data-task-id]')];
+  const idx    = cards.indexOf(card);
+  const target = idx + delta;
+  if (idx === -1 || target < 0 || target >= cards.length) return;
+
+  if (delta < 0) zone.insertBefore(card, cards[target]);
+  else           zone.insertBefore(card, cards[target].nextSibling);
+
+  vibrate(15);
+  card.querySelector('.kanban-card__title')?.focus();
+  runColumnReorder(zone.dataset.dropZone, container);
 }
 
 function renderKanbanCard(task, opts = {}) {
@@ -2001,7 +2098,7 @@ function renderKanban(container) {
 
   const now = new Date();
   for (const col of cols) {
-    grouped[col.status].sort((a, b) => sortTasks(a, b, now));
+    grouped[col.status].sort((a, b) => sortKanbanColumn(a, b, now));
   }
 
   // Bei aktiver Suche ohne Treffer wäre ein Board aus lauter „Keine Aufgaben"-
@@ -2046,7 +2143,7 @@ function renderKanban(container) {
           <div class="kanban-col__body" data-drop-zone="${col.status}">
             ${grouped[col.status].length
               ? grouped[col.status].map((task) => renderKanbanCard(task, {
-                  expandedSubtasks: state.subtasksExpandedByDefault,
+                  expandedSubtasks: isSubtasksExpanded(task.id),
                 })).join('')
               : `<div class="kanban-col__empty">
                    <span class="kanban-col__empty-idle">${t('tasks.kanbanColEmpty')}</span>
@@ -2085,11 +2182,14 @@ function renderKanban(container) {
  *    Ablage (#688). Beides entscheidet unveraendert `runColumnMove` - der eine
  *    Weg, den auch der Weiterschalt-Knopf geht. Hier wird nur noch die Spalte
  *    abgelesen.
- * 2. `sort: false`. Das Board speichert KEINE Reihenfolge innerhalb einer
- *    Spalte, und was es nicht speichert, darf es nicht anbieten: eine
- *    umsortierte Karte bliebe sonst an ihrem neuen Platz liegen, bis
- *    irgendetwas anderes neu zeichnet. Zwischen den Spalten bleibt der Zug
- *    erlaubt - genau das ist `sort: false` mit `group`.
+ * 2. `sort: true` seit der Von-Hand-Reihenfolge (#1251, vorher `false`): das
+ *    Board speichert jetzt eine Reihenfolge innerhalb einer Spalte
+ *    (tasks.sort_order), also darf es sie auch per Zug anbieten. `onEnd`
+ *    unterscheidet Umsortierung von Spaltenwechsel an `evt.from` vs. `evt.to`
+ *    und ruft je nachdem `runColumnReorder` oder weiterhin `runColumnMove`.
+ *    Der Tastaturpfad daneben (moveKanbanCard, Pfeiltasten am Titel-Knopf)
+ *    ruft denselben `runColumnReorder` auf - Drag allein waere kein Weg fuer
+ *    Tastatur- und Screenreader-Bedienung (Kopf von public/utils/sortable.js).
  */
 let kanbanSortables = [];
 
@@ -2130,15 +2230,42 @@ function wireKanbanSortable(container) {
       // fallen lassen.
       filter: '[data-next-status], [data-action]',
       group: 'kanban-board',
-      sort: false,
+      // TRUE SEIT DER VON-HAND-REIHENFOLGE (#1251): vorher `false`, weil das
+      // Board ausschliesslich Spalten wechselte und eine Umsortierung
+      // innerhalb einer Spalte ohnehin nirgendwo landete. `onEnd` unten
+      // unterscheidet jetzt beide Faelle an `evt.from` vs. `evt.to`.
+      sort: true,
       onEnd: (evt) => {
-        const column = evt.to?.dataset.dropZone;
+        const fromColumn = evt.from?.dataset.dropZone;
+        const column     = evt.to?.dataset.dropZone;
         const task = state.tasks.find((t) => String(t.id) === String(evt.item?.dataset.taskId));
-        if (!column || !task || kanbanColumnOf(task) === column) return;
+        if (!column || !task) return;
+        if (fromColumn === column) {
+          // Reine Umsortierung (#1251): SortableJS hat die Karte schon an die
+          // richtige DOM-Stelle gezogen, kein Statuswechsel noetig.
+          runColumnReorder(column, container);
+          return;
+        }
+        if (kanbanColumnOf(task) === column) return;
         runColumnMove(task, column, container);
       },
     }).then((inst) => { if (inst) kanbanSortables.push(inst); })
       .catch(() => { /* ohne SortableJS bleibt der Weiterschalt-Knopf jeder Karte */ });
+  });
+
+  // Tastaturpfad, delegiert: derselbe Persistenz-Handler wie das Drag-Ende
+  // (moveKanbanCard ruft runColumnReorder). Kein "schon verdrahtet"-Wächter
+  // noetig, anders als bei #items-list in shopping.js: `board` ist hier bei
+  // JEDEM Aufruf ein frisches Element (renderKanban() ersetzt den ganzen
+  // Inhalt von #task-list, .kanban-board eingeschlossen), genau wie
+  // wireKanbanClicks() oben seinen eigenen Klick-Listener ohne Waechter
+  // neu anhaengt - der alte Knoten samt altem Listener wird verworfen.
+  board.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    const title = e.target.closest?.('.kanban-card__title');
+    if (!title) return;
+    e.preventDefault();
+    moveKanbanCard(title.closest('.kanban-card'), e.key === 'ArrowUp' ? -1 : 1, container);
   });
 }
 
@@ -3651,6 +3778,8 @@ function wireTaskList(container) {
       if (subtaskList) {
         const open = subtaskList.classList.toggle('subtask-list--visible');
         target.setAttribute('aria-expanded', String(open));
+        if (open) state.expandedSubtaskTaskIds.add(id);
+        else state.expandedSubtaskTaskIds.delete(id);
       }
     }
 

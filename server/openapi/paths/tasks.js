@@ -31,6 +31,15 @@ export function tasksPaths() {
       }),
       post: op({ summary: 'Create task', tag: 'Tasks', stateChanging: true, requestBody: jsonBody(null), description: 'Body accepts `locked: true` to close the task definition to everyone but its creator and administrators (#830). A subtask under a locked parent inherits the lock, and adding one requires the same rights. `status` may be set on creation (#807); it runs through the same transition handling as PUT and PATCH, so creating a task as `done` books its points and writes its completion entry. `null`, an empty string and `archived` all fall back to `open` - filing a task away is a separate axis and not something a creation can do.' }),
     },
+    '/api/v1/tasks/reorder': {
+      patch: op({
+        summary: 'Reorder tasks within a Kanban column',
+        tag: 'Tasks',
+        stateChanging: true,
+        requestBody: jsonBody(null),
+        description: 'Body: { column: "open"|"in_progress"|"done"|"archived", order: number[] }. `order` must name every top-level task currently in that column, visible to the caller - a partial list is rejected, since the ranks of the tasks left out would collide with the newly assigned ones. `archived` is not a status but the separate archive axis (`archived_at`), matching how the Kanban board itself groups cards. Returns the new `sort_order` for each task in `order`.',
+      }),
+    },
     '/api/v1/tasks/meta/options': { get: op({ summary: 'Get task metadata', tag: 'Tasks' }) },
     '/api/v1/tasks/completions': {
       get: op({

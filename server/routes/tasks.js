@@ -902,6 +902,78 @@ router.get('/', (req, res) => {
 });
 
 // --------------------------------------------------------
+// PATCH /api/v1/tasks/reorder
+// Reihenfolge der Aufgaben INNERHALB einer Kanban-Spalte per Hand ändern (#1251).
+// Body: { column: 'open'|'in_progress'|'done'|'archived', order: number[] }
+// Response: { data: { id, sort_order }[] }
+//
+// Dieselbe Idee wie /categories/reorder oben und /:listId/items/reorder in
+// shopping.js (#678): die Anfrage muss ALLE Aufgaben der Spalte nennen, sonst
+// kollidieren die Ränge der Ausgelassenen mit den neu vergebenen.
+//
+// 'archived' IST KEIN status-WERT, sondern die Ablage-Achse (archived_at,
+// #688) - genau wie kanbanColumnOf() im Frontend sie behandelt. Die anderen
+// drei Spalten sind ein echter Status UND archived_at IS NULL, sonst zeigte
+// ein Zug in der Spalte "Offen" plötzlich eine abgelegte Aufgabe wieder an.
+// --------------------------------------------------------
+const KANBAN_REORDER_COLUMNS = ['open', 'in_progress', 'done', 'archived'];
+
+router.patch('/reorder', (req, res) => {
+  try {
+    const { column, order } = req.body;
+    if (!KANBAN_REORDER_COLUMNS.includes(column)) {
+      return res.status(400).json({
+        error: `column must be one of ${KANBAN_REORDER_COLUMNS.join(', ')}.`,
+        code: 400,
+      });
+    }
+    if (!Array.isArray(order) || order.length === 0)
+      return res.status(400).json({ error: 'order must be a non-empty array of task IDs.', code: 400 });
+
+    const ids = order.map(Number);
+    if (ids.some((id) => !Number.isInteger(id)))
+      return res.status(400).json({ error: 'order may only contain task IDs.', code: 400 });
+    if (new Set(ids).size !== ids.length)
+      return res.status(400).json({ error: 'order must not contain a duplicate ID.', code: 400 });
+
+    const me = req.authUserId || req.session.userId;
+    const columnWhere = column === 'archived' ? 't.archived_at IS NOT NULL' : 't.status = ? AND t.archived_at IS NULL';
+    const columnParams = column === 'archived' ? [] : [column];
+
+    // Die Spalte ist der Geltungsbereich der Raenge, wie die Kategorie bei den
+    // Einkaufsartikeln - eine fremde ID darin wuerde eine Aufgabe aus einer
+    // anderen Spalte oder eines anderen Haushaltsmitglieds umnummerieren.
+    const own = db.get()
+      .prepare(`
+        SELECT t.id FROM tasks t
+        WHERE t.parent_task_id IS NULL AND ${columnWhere}
+          AND ${visibilityWhere('t', 'task_assignments', 'task_id')}
+      `)
+      .all(...columnParams, me, me)
+      .map((r) => r.id);
+
+    const ownSet = new Set(own);
+    if (ids.some((id) => !ownSet.has(id)))
+      return res.status(400).json({ error: 'order contains a task outside this column.', code: 400 });
+    if (ids.length !== own.length)
+      return res.status(400).json({ error: 'order must contain every task in this column.', code: 400 });
+
+    const update = db.get().prepare('UPDATE tasks SET sort_order = ? WHERE id = ?');
+    db.get().transaction(() => {
+      // Ab 1, nicht ab 0: eine unberuehrte Aufgabe traegt weiterhin die 0 aus
+      // der Migration und faellt bei sortTasks() auf die Faelligkeit zurueck -
+      // 0 bleibt damit die Marke "noch nie von Hand einsortiert".
+      ids.forEach((id, idx) => update.run(idx + 1, id));
+    })();
+
+    res.json({ data: ids.map((id, idx) => ({ id, sort_order: idx + 1 })) });
+  } catch (err) {
+    log.error('PATCH /reorder error:', err);
+    res.status(500).json({ error: 'Internal server error.', code: 500 });
+  }
+});
+
+// --------------------------------------------------------
 // GET /api/v1/tasks/:id
 // Einzelne Aufgabe mit Subtasks.
 // Response: { data: Task & { subtasks: Task[] } }

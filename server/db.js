@@ -8587,6 +8587,19 @@ const MIGRATIONS = [
       ALTER TABLE display_devices ADD COLUMN cookie_refreshed_at TEXT;
     `,
   },
+  {
+    version: 217,
+    description: 'Tasks: manual drag order within a Kanban column (#1251)',
+    // DEFAULT 0 FUER ALLE BESTANDSAUFGABEN, mit Absicht ein Gleichstand statt
+    // einer erfundenen Reihenfolge. Der Vergleich in sortTasks() (tasks.js)
+    // faellt bei Gleichstand auf die bisherige Faelligkeits-Sortierung zurueck -
+    // eine Karte behaelt also ihren Platz, bis jemand sie von Hand zieht. Erst
+    // das Ziehen vergibt fortlaufende Raenge (dieselbe Idee wie
+    // shopping_items.sort_order, #678), und ab dann sticht der Rang das Datum.
+    up: `
+      ALTER TABLE tasks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 /**
